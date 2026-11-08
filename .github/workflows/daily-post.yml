@@ -2,12 +2,17 @@ name: Consorcio Daily Post Radar
 
 on:
   schedule:
-    - cron: '30 9 * * *' # Roda às 06:30 no horário de Brasília (09:30 UTC)
+    - cron: '30 9 * * *' # 06:30 em Brasília (09:30 UTC). O GitHub pode atrasar alguns minutos.
   workflow_dispatch:       # Permite rodar manualmente clicando no botão
+
+concurrency:
+  group: daily-post
+  cancel-in-progress: false
 
 jobs:
   run-radar:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout do código
@@ -29,3 +34,14 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: npm start
+
+      - name: Avisar falha no Telegram
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=⚠️ Radar Consórcio falhou hoje. Veja o log: ${RUN_URL}" > /dev/null
