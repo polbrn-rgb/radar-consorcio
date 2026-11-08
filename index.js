@@ -2,7 +2,15 @@ import crypto from 'crypto';
 import admin from 'firebase-admin';
 import Parser from 'rss-parser';
 
-const parser = new Parser();
+// Configura o parser simulando um navegador real para evitar bloqueio 503
+const parser = new Parser({
+  headers: {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept': 'application/rss+xml, application/xml, text/xml; q=0.9, */*; q=0.8',
+    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+  },
+  timeout: 15000
+});
 
 // Variáveis de ambiente injetadas pelo GitHub Actions
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -21,15 +29,48 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 const NOTICIAS_COLLECTION = 'radar_noticias_usadas';
 
-// Busca focada em consórcio, financiamento e taxa selic
-const RSS_URL = 'https://news.google.com/rss/search?q=consorcio+OR+%22taxa+selic%22+OR+%22financiamento+imobiliario%22&hl=pt-BR&gl=BR&ceid=BR:pt-419';
+// Lista de fontes RSS (Principal: Google News | Reserva: Bing News)
+const RSS_URLS = [
+  'https://news.google.com/rss/search?q=consorcio+OR+%22taxa+selic%22+OR+%22financiamento+imobiliario%22&hl=pt-BR&gl=BR&ceid=BR:pt-419',
+  'https://www.bing.com/news/search?q=consorcio+imobiliario+OR+taxa+selic&format=rss&mkt=pt-br'
+];
 
 function generateDocId(url) {
   return crypto.createHash('md5').update(url.trim()).digest('hex');
 }
 
+// Função auxiliar para aguardar alguns segundos entre tentativas
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function fetchFeedWithRetry() {
+  for (const url of RSS_URLS) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        console.log(`Tentando ler feed (${attempt}/2): ${url.substring(0, 45)}...`);
+        const response = await fetch(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept-Language': 'pt-BR,pt;q=0.9'
+          }
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP Status ${response.status}`);
+        }
+
+        const xml = await response.text();
+        return await parser.parseString(xml);
+      } catch (err) {
+        console.warn(`Aviso na tentativa ${attempt}: ${err.message}`);
+        await sleep(3000);
+      }
+    }
+  }
+  throw new Error('Todas as fontes de RSS retornaram erro temporário.');
+}
+
 async function fetchUnusedNews() {
-  const feed = await parser.parseURL(RSS_URL);
+  const feed = await fetchFeedWithRetry();
   const candidates = feed.items.slice(0, 15);
   const unusedArticles = [];
 
@@ -37,11 +78,12 @@ async function fetchUnusedNews() {
     const link = item.link || item.guid || '';
     if (!link) continue;
 
-    const docId = generateDocId(link);
+    // Usa o título como base se o link for redirecionador dinâmico
+    const uniqueKey = item.title ? `${item.title}-${link.substring(0, 40)}` : link;
+    const docId = generateDocId(uniqueKey);
     const docRef = db.collection(NOTICIAS_COLLECTION).doc(docId);
     const docSnap = await docRef.get();
 
-    // Se a notícia não existe no banco, adiciona aos candidatos
     if (!docSnap.exists) {
       unusedArticles.push({
         id: docId,
@@ -69,12 +111,11 @@ Escolha a notícia mais relevante/impactante e gere a resposta rigorosamente em 
 - "selectedArticleId": (o campo "id" exato da matéria escolhida)
 - "selectedTitle": (título da matéria escolhida)
 - "selectedLink": (link da matéria escolhida)
-- "postContent": (o texto completo do post formatado em Markdown para envio no Telegram, contendo ganchos, legenda completa com raciocínio financeiro/CTA e sugestão de imagem/carrossel).
+- "postContent": (o texto completo do post formatado em Markdown para envio no Telegram, contendo 3 opções de ganchos, legenda completa com raciocínio financeiro/CTA e sugestão de imagem/carrossel).
 
 Retorne APENAS o JSON válido sem formatação Markdown externa (sem blocos \`\`\`json).
 `;
 
-  // VERSÃO DA API ATUALIZADA AQUI PARA gemini-3.8-flash
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`;
   
   const response = await fetch(url, {
