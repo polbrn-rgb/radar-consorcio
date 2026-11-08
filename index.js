@@ -74,7 +74,8 @@ Escolha a notícia mais relevante/impactante e gere a resposta rigorosamente em 
 Retorne APENAS o JSON válido sem formatação Markdown externa (sem blocos \`\`\`json).
 `;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+  // VERSÃO DA API ATUALIZADA AQUI PARA gemini-3.8-flash
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`;
   
   const response = await fetch(url, {
     method: 'POST',
