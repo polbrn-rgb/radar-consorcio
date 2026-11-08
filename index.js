@@ -11,7 +11,6 @@ const parser = new Parser({
   timeout: 15000
 });
 
-// .trim() remove espaços em branco acidentais ao redor das chaves
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || '').trim();
 const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const TELEGRAM_CHAT_ID = (process.env.TELEGRAM_CHAT_ID || '').trim();
@@ -111,32 +110,62 @@ Escolha a notícia mais relevante/impactante e gere a resposta rigorosamente em 
 Retorne APENAS o JSON válido sem formatação Markdown externa (sem blocos \`\`\`json).
 `;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`;
-  
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.5,
-        responseMimeType: 'application/json'
-      }
-    })
-  });
+  // Lista de modelos: se o principal estiver com alta demanda (503), tenta os seguintes
+  const models = [
+    'gemini-3.8-flash',
+    'gemini-3.8-pro',
+    'gemini-2.0-flash'
+  ];
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Erro na API Gemini (${response.status}): ${errorText}`);
+  let lastError = null;
+
+  for (const model of models) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`Gerando com ${model} (tentativa ${attempt}/3)...`);
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature: 0.5,
+              responseMimeType: 'application/json'
+            }
+          })
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          // Se o modelo não existir na conta (404), pula direto para o próximo modelo da lista
+          if (response.status === 404) {
+            console.warn(`Modelo ${model} indisponível (404). Testando próximo modelo...`);
+            break;
+          }
+          throw new Error(`Status ${response.status}: ${errorText}`);
+        }
+
+        const data = await response.json();
+        let rawText = data.candidates[0].content.parts[0].text;
+        rawText = rawText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+
+        const parsed = JSON.parse(rawText);
+        return Array.isArray(parsed) ? parsed[0] : parsed;
+      } catch (err) {
+        lastError = err;
+        console.warn(`Aviso em ${model} (tentativa ${attempt}): ${err.message}`);
+        if (attempt < 3) {
+          const waitTime = attempt * 6000; // Espera 6s na 1ª falha, 12s na 2ª falha
+          console.log(`Servidor ocupado. Aguardando ${waitTime / 1000}s antes de tentar novamente...`);
+          await sleep(waitTime);
+        }
+      }
+    }
   }
 
-  const data = await response.json();
-  let rawText = data.candidates[0].content.parts[0].text;
-  rawText = rawText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
-  
-  const parsed = JSON.parse(rawText);
-  if (Array.isArray(parsed)) return parsed[0];
-  return parsed;
+  throw new Error(`Falha na API Gemini após testar todos os modelos: ${lastError?.message}`);
 }
 
 async function markArticleAsUsed(articleId, title, link) {
@@ -154,7 +183,6 @@ async function sendTelegramMessage(text) {
 
   let chatId = TELEGRAM_CHAT_ID;
 
-  // Função interna para disparar um trecho de mensagem
   const sendChunk = async (targetChatId, chunk) => {
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
     const response = await fetch(url, {
@@ -169,7 +197,6 @@ async function sendTelegramMessage(text) {
     return await response.json();
   };
 
-  // Se o ID salvo falhar, consulta as últimas mensagens recebidas pelo bot para pegar o ID real
   let firstChunk = text.substring(0, 4000);
   let firstAttempt = await sendChunk(chatId, firstChunk);
 
@@ -188,9 +215,8 @@ async function sendTelegramMessage(text) {
           break;
         }
       }
-      console.log(`Chat ID descoberto automaticamente: ${chatId} (Atualize sua secret TELEGRAM_CHAT_ID depois com esse número!)`);
-      
-      // Reenvia o primeiro bloco usando o ID descoberto
+      console.log(`Chat ID descoberto automaticamente: ${chatId}`);
+
       firstAttempt = await sendChunk(chatId, firstChunk);
       if (!firstAttempt.ok) {
         throw new Error(`Erro na API do Telegram mesmo com ID automático (${chatId}): ${JSON.stringify(firstAttempt)}`);
@@ -198,12 +224,11 @@ async function sendTelegramMessage(text) {
     } else {
       throw new Error(
         `Erro no Telegram: ${JSON.stringify(firstAttempt)}. ` +
-        `Nenhuma mensagem encontrada no bot. Abra o seu bot no Telegram, clique em Começar (Start) e envie "Oi" agora mesmo antes de rodar novamente.`
+        `Nenhuma mensagem encontrada no bot. Abra o seu bot no Telegram, clique em Começar (Start) e envie "Oi".`
       );
     }
   }
 
-  // Se o texto for maior que 4000 caracteres, envia o restante das partes
   const maxChunkSize = 4000;
   for (let i = maxChunkSize; i < text.length; i += maxChunkSize) {
     const chunk = text.substring(i, i + maxChunkSize);
