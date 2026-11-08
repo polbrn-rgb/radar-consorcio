@@ -1,0 +1,12 @@
+{
+  "name": "consorcio-radar",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0",
+    "rss-parser": "^3.13.0"
+  }
+}
