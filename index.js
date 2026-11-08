@@ -2,7 +2,6 @@ import crypto from 'crypto';
 import admin from 'firebase-admin';
 import Parser from 'rss-parser';
 
-// Configura o parser simulando um navegador real para evitar bloqueio 503
 const parser = new Parser({
   headers: {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -12,13 +11,12 @@ const parser = new Parser({
   timeout: 15000
 });
 
-// Variáveis de ambiente injetadas pelo GitHub Actions
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+// .trim() remove espaços em branco acidentais ao redor das chaves
+const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || '').trim();
+const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+const TELEGRAM_CHAT_ID = (process.env.TELEGRAM_CHAT_ID || '').trim();
 const FIREBASE_SERVICE_ACCOUNT = process.env.FIREBASE_SERVICE_ACCOUNT;
 
-// Inicializa o Firebase Admin
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(FIREBASE_SERVICE_ACCOUNT);
   admin.initializeApp({
@@ -29,7 +27,6 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 const NOTICIAS_COLLECTION = 'radar_noticias_usadas';
 
-// Lista de fontes RSS (Principal: Google News | Reserva: Bing News)
 const RSS_URLS = [
   'https://news.google.com/rss/search?q=consorcio+OR+%22taxa+selic%22+OR+%22financiamento+imobiliario%22&hl=pt-BR&gl=BR&ceid=BR:pt-419',
   'https://www.bing.com/news/search?q=consorcio+imobiliario+OR+taxa+selic&format=rss&mkt=pt-br'
@@ -39,7 +36,6 @@ function generateDocId(url) {
   return crypto.createHash('md5').update(url.trim()).digest('hex');
 }
 
-// Função auxiliar para aguardar alguns segundos entre tentativas
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function fetchFeedWithRetry() {
@@ -78,7 +74,6 @@ async function fetchUnusedNews() {
     const link = item.link || item.guid || '';
     if (!link) continue;
 
-    // Usa o título como base se o link for redirecionador dinâmico
     const uniqueKey = item.title ? `${item.title}-${link.substring(0, 40)}` : link;
     const docId = generateDocId(uniqueKey);
     const docRef = db.collection(NOTICIAS_COLLECTION).doc(docId);
@@ -111,7 +106,7 @@ Escolha a notícia mais relevante/impactante e gere a resposta rigorosamente em 
 - "selectedArticleId": (o campo "id" exato da matéria escolhida)
 - "selectedTitle": (título da matéria escolhida)
 - "selectedLink": (link da matéria escolhida)
-- "postContent": (o texto completo do post formatado em Markdown para envio no Telegram, contendo 3 opções de ganchos, legenda completa com raciocínio financeiro/CTA e sugestão de imagem/carrossel).
+- "postContent": (o texto completo do post formatado em texto limpo e organizado com emojis para envio no Telegram, contendo 3 opções de ganchos, legenda completa com raciocínio financeiro/CTA e sugestão de imagem/carrossel).
 
 Retorne APENAS o JSON válido sem formatação Markdown externa (sem blocos \`\`\`json).
 `;
@@ -136,8 +131,12 @@ Retorne APENAS o JSON válido sem formatação Markdown externa (sem blocos \`\`
   }
 
   const data = await response.json();
-  const rawText = data.candidates[0].content.parts[0].text;
-  return JSON.parse(rawText);
+  let rawText = data.candidates[0].content.parts[0].text;
+  rawText = rawText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+  
+  const parsed = JSON.parse(rawText);
+  if (Array.isArray(parsed)) return parsed[0];
+  return parsed;
 }
 
 async function markArticleAsUsed(articleId, title, link) {
@@ -149,32 +148,30 @@ async function markArticleAsUsed(articleId, title, link) {
 }
 
 async function sendTelegramMessage(text) {
+  if (!text) {
+    throw new Error('O conteúdo do post veio vazio da IA.');
+  }
+
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
   const maxChunkSize = 4000;
 
   for (let i = 0; i < text.length; i += maxChunkSize) {
     const chunk = text.substring(i, i + maxChunkSize);
+    
+    // Envia direto sem parse_mode estrito para evitar bloqueio por caracteres especiais
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chat_id: TELEGRAM_CHAT_ID,
         text: chunk,
-        parse_mode: 'Markdown',
         disable_web_page_preview: true
       })
     });
 
-    if (!response.ok) {
-      await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: TELEGRAM_CHAT_ID,
-          text: chunk,
-          disable_web_page_preview: true
-        })
-      });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(`Erro na API do Telegram (${response.status}): ${JSON.stringify(data)}`);
     }
   }
 }
@@ -186,11 +183,15 @@ async function run() {
 
     if (!articles.length) {
       console.log('Nenhuma notícia inédita encontrada hoje.');
-      return;
+      process.exit(0);
     }
 
     console.log(`Encontradas ${articles.length} matérias inéditas. Gerando conteúdo com Gemini...`);
     const result = await generateSocialPost(articles);
+
+    console.log('--- PRÉVIA DO POST GERADO ---');
+    console.log(result.postContent);
+    console.log('-----------------------------');
 
     console.log('2. Enviando post para o Telegram...');
     await sendTelegramMessage(result.postContent);
@@ -199,6 +200,7 @@ async function run() {
     await markArticleAsUsed(result.selectedArticleId, result.selectedTitle, result.selectedLink);
 
     console.log('Rotina concluída com sucesso!');
+    process.exit(0);
   } catch (error) {
     console.error('Falha na execução:', error);
     process.exit(1);
