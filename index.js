@@ -152,26 +152,65 @@ async function sendTelegramMessage(text) {
     throw new Error('O conteúdo do post veio vazio da IA.');
   }
 
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-  const maxChunkSize = 4000;
+  let chatId = TELEGRAM_CHAT_ID;
 
-  for (let i = 0; i < text.length; i += maxChunkSize) {
-    const chunk = text.substring(i, i + maxChunkSize);
-    
-    // Envia direto sem parse_mode estrito para evitar bloqueio por caracteres especiais
+  // Função interna para disparar um trecho de mensagem
+  const sendChunk = async (targetChatId, chunk) => {
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
+        chat_id: targetChatId,
         text: chunk,
         disable_web_page_preview: true
       })
     });
+    return await response.json();
+  };
 
-    const data = await response.json();
-    if (!response.ok || !data.ok) {
-      throw new Error(`Erro na API do Telegram (${response.status}): ${JSON.stringify(data)}`);
+  // Se o ID salvo falhar, consulta as últimas mensagens recebidas pelo bot para pegar o ID real
+  let firstChunk = text.substring(0, 4000);
+  let firstAttempt = await sendChunk(chatId, firstChunk);
+
+  if (!firstAttempt.ok) {
+    console.log('ID configurado falhou. Buscando Chat ID automaticamente nas mensagens recebidas pelo bot...');
+    const updatesUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates`;
+    const updatesRes = await fetch(updatesUrl);
+    const updatesData = await updatesRes.json();
+
+    if (updatesData.ok && updatesData.result && updatesData.result.length > 0) {
+      for (let i = updatesData.result.length - 1; i >= 0; i--) {
+        const item = updatesData.result[i];
+        const foundId = item.message?.chat?.id || item.my_chat_member?.chat?.id || item.channel_post?.chat?.id;
+        if (foundId) {
+          chatId = foundId.toString();
+          break;
+        }
+      }
+      console.log(`Chat ID descoberto automaticamente: ${chatId} (Atualize sua secret TELEGRAM_CHAT_ID depois com esse número!)`);
+      
+      // Reenvia o primeiro bloco usando o ID descoberto
+      firstAttempt = await sendChunk(chatId, firstChunk);
+      if (!firstAttempt.ok) {
+        throw new Error(`Erro na API do Telegram mesmo com ID automático (${chatId}): ${JSON.stringify(firstAttempt)}`);
+      }
+    } else {
+      throw new Error(
+        `Erro no Telegram: ${JSON.stringify(firstAttempt)}. ` +
+        `Nenhuma mensagem encontrada no bot. Abra o seu bot no Telegram, clique em Começar (Start) e envie "Oi" agora mesmo antes de rodar novamente.`
+      );
+    }
+  }
+
+  // Se o texto for maior que 4000 caracteres, envia o restante das partes
+  const maxChunkSize = 4000;
+  for (let i = maxChunkSize; i < text.length; i += maxChunkSize) {
+    const chunk = text.substring(i, i + maxChunkSize);
+    const data = await sendChunk(chatId, chunk);
+
+    if (!data.ok) {
+      throw new Error(`Erro na API do Telegram na parte seguinte: ${JSON.stringify(data)}`);
     }
   }
 }
