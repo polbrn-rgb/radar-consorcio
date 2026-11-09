@@ -2,7 +2,7 @@ name: Consorcio Daily Post Radar
 
 on:
   schedule:
-    - cron: '30 9 * * *' # 06:30 em Brasília (09:30 UTC). O GitHub pode atrasar alguns minutos.
+    - cron: '7 9 * * *' # 06:07 em Brasília (09:07 UTC). Minuto "quebrado" para fugir do pico do GitHub, que pode atrasar até ~1h.
   workflow_dispatch:       # Permite rodar manualmente clicando no botão
 
 concurrency:
