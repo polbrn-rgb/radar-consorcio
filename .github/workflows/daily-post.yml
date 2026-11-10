@@ -1,8 +1,9 @@
 name: Consorcio Daily Post Radar
 
 on:
-  schedule:
-    - cron: '7 9 * * *' # 06:07 em Brasília (09:07 UTC). Minuto "quebrado" para fugir do pico do GitHub, que pode atrasar até ~1h.
+  # O agendamento diário é feito por uma tarefa agendada no Claude, que dispara
+  # este workflow às 05:45 (Brasília). O cron do GitHub foi removido porque não
+  # disparava de forma confiável e poderia gerar mensagens duplicadas.
   workflow_dispatch:       # Permite rodar manualmente clicando no botão
 
 concurrency:
